@@ -383,14 +383,33 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
         try:
             with client.stream("POST", url, content=body, headers=headers) as resp:
                 resp.raise_for_status()
-                last_data_time = time.time()
                 buf = ""
-                for chunk in resp.iter_text():
-                    buf += chunk
-                    
-                    if time.time() - last_data_time > 10.0:
-                        # 10 seconds without ANY valid Google data, stream is dead
+                import threading, queue
+                q = queue.Queue()
+                
+                def _reader():
+                    try:
+                        for c in resp.iter_text():
+                            q.put(("data", c))
+                        q.put(("done", None))
+                    except Exception as e:
+                        q.put(("error", e))
+                        
+                t = threading.Thread(target=_reader, daemon=True)
+                t.start()
+                
+                while True:
+                    try:
+                        msg, chunk = q.get(timeout=10.0)
+                        if msg == "done":
+                            break
+                        if msg == "error":
+                            raise chunk
+                    except queue.Empty:
+                        # 10 seconds without any data yielded, stream is dead
                         return
+                        
+                    buf += chunk
                         
                     if "BardErrorInfo" in buf:
                         import re as _re
@@ -419,7 +438,6 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
                                                 delta = t[len(prev_text):]
                                                 delta = clean_gemini_text(delta, strip=False)
                                                 if delta:
-                                                    last_data_time = time.time() # ONLY update when valid text is found
                                                     yield delta
                                                 prev_text = t
                         except (json.JSONDecodeError, IndexError, TypeError):
