@@ -391,10 +391,14 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
                         m = _re.search(r'BardErrorInfo\s*\[(\d+)\]', buf)
                         if m:
                             raise RuntimeError(f"Gemini upstream rejected request: BardErrorInfo [{m.group(1)}]")
+                            
+                    # The final chunk from Google might not end with a newline.
+                    # We check buf directly to break out immediately.
+                    if '[["e",' in buf or '[["di",' in buf or '["di"' in buf:
+                        return
+
                     while "\n" in buf:
                         line, buf = buf.split("\n", 1)
-                        if line.startswith('[["e",') or line.startswith('[["di",'):
-                            return
                         if '"wrb.fr"' not in line or len(line) < 200:
                             continue
                         try:
