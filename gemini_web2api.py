@@ -383,7 +383,6 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
         try:
             with client.stream("POST", url, content=body, headers=headers) as resp:
                 resp.raise_for_status()
-                import time
                 last_data_time = time.time()
                 buf = ""
                 for chunk in resp.iter_text():
