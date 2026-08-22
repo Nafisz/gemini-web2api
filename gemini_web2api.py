@@ -375,7 +375,11 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
 
     prev_text = ""
     transport = httpx.HTTPTransport(proxy=proxy) if proxy else None
-    with httpx.Client(transport=transport, timeout=CONFIG["request_timeout_sec"], verify=True) as client:
+    
+    # Use a custom timeout: 180s for connect/pool, but 10s for read. 
+    # If the stream is completely silent for 10s, we assume generation is done.
+    timeout = httpx.Timeout(CONFIG["request_timeout_sec"], read=10.0)
+    with httpx.Client(transport=transport, timeout=timeout, verify=True) as client:
         try:
             with client.stream("POST", url, content=body, headers=headers) as resp:
                 resp.raise_for_status()
@@ -411,6 +415,9 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
                                                 prev_text = t
                         except (json.JSONDecodeError, IndexError, TypeError):
                             pass
+        except httpx.ReadTimeout:
+            # Silence for 10 seconds means the stream is likely finished but Google/Proxy didn't close it
+            return
         except Exception as e:
             if HAS_HTTPX and hasattr(e, 'response') and getattr(e.response, 'status_code', 0) == 405:
                 if update_bl_if_needed():
