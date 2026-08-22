@@ -383,9 +383,19 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
         try:
             with client.stream("POST", url, content=body, headers=headers) as resp:
                 resp.raise_for_status()
+                import time
+                last_data_time = time.time()
                 buf = ""
                 for chunk in resp.iter_text():
                     buf += chunk
+                    
+                    # Track if we received actual content, not just keep-alives
+                    if len(chunk.strip()) > 0:
+                        last_data_time = time.time()
+                    elif time.time() - last_data_time > 10.0:
+                        # 10 seconds of pure keep-alives, stream is dead
+                        return
+                        
                     if "BardErrorInfo" in buf:
                         import re as _re
                         m = _re.search(r'BardErrorInfo\s*\[(\d+)\]', buf)
@@ -393,7 +403,6 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
                             raise RuntimeError(f"Gemini upstream rejected request: BardErrorInfo [{m.group(1)}]")
                             
                     # The final chunk from Google might not end with a newline.
-                    # We check buf directly to break out immediately.
                     if '[["e",' in buf or '[["di",' in buf or '["di"' in buf:
                         return
 
