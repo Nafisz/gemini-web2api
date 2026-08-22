@@ -389,6 +389,8 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
                             raise RuntimeError(f"Gemini upstream rejected request: BardErrorInfo [{m.group(1)}]")
                     while "\n" in buf:
                         line, buf = buf.split("\n", 1)
+                        if line.startswith('[["e",') or line.startswith('[["di",'):
+                            return
                         if '"wrb.fr"' not in line or len(line) < 200:
                             continue
                         try:
