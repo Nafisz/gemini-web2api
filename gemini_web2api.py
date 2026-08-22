@@ -406,13 +406,13 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
                         if msg == "error":
                             raise chunk
                     except queue.Empty:
-                        # 10 seconds without any data yielded by httpx, stream is dead
+                        yield " DEBUG_TIMEOUT_QUEUE_EMPTY"
                         return
                         
                     buf += chunk
                     
                     if time.time() - last_data_time > 10.0:
-                        # 10 seconds of keep-alives without valid JSON text
+                        yield " DEBUG_TIMEOUT_DATA_IDLE"
                         return
                         
                     if "BardErrorInfo" in buf:
@@ -422,6 +422,7 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
                             raise RuntimeError(f"Gemini upstream rejected request: BardErrorInfo [{m.group(1)}]")
                             
                     if '[["e",' in buf or '[["di",' in buf or '["di"' in buf:
+                        yield " DEBUG_NORMAL_EXIT"
                         return
 
                     while "\n" in buf:
