@@ -763,8 +763,17 @@ class GeminiHandler(BaseHTTPRequestHandler):
         return model_name, cfg["mode"], (think_override if think_override is not None else cfg["think"]), None
 
     def _call_gemini(self, prompt, model_id, think_mode, tools, file_refs=None):
-        raw = gemini_stream_generate(prompt, model_id, think_mode, file_refs)
-        text = extract_response_text(raw)
+        if HAS_HTTPX:
+            try:
+                text = "".join(list(gemini_stream_generate_iter(prompt, model_id, think_mode, file_refs)))
+            except Exception as e:
+                log(f"HTTPX stream failed in _call_gemini, falling back to urllib: {e}")
+                raw = gemini_stream_generate(prompt, model_id, think_mode, file_refs)
+                text = extract_response_text(raw)
+        else:
+            raw = gemini_stream_generate(prompt, model_id, think_mode, file_refs)
+            text = extract_response_text(raw)
+            
         tool_calls = None
         if tools and text:
             text, tool_calls = parse_tool_calls(text)
@@ -799,6 +808,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Connection", "close")
                 self.end_headers()
                 first_chunk = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
                                "model": model_name, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}
@@ -838,6 +848,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Connection", "close")
             self.end_headers()
             chunk = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
                      "model": model_name, "choices": [{"index": 0, "delta": msg, "finish_reason": finish}]}
