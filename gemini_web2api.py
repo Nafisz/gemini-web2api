@@ -388,11 +388,8 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
                 for chunk in resp.iter_text():
                     buf += chunk
                     
-                    # Track if we received actual content, not just keep-alives
-                    if len(chunk.strip()) > 0:
-                        last_data_time = time.time()
-                    elif time.time() - last_data_time > 10.0:
-                        # 10 seconds of pure keep-alives, stream is dead
+                    if time.time() - last_data_time > 10.0:
+                        # 10 seconds without ANY valid Google data, stream is dead
                         return
                         
                     if "BardErrorInfo" in buf:
@@ -401,7 +398,6 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
                         if m:
                             raise RuntimeError(f"Gemini upstream rejected request: BardErrorInfo [{m.group(1)}]")
                             
-                    # The final chunk from Google might not end with a newline.
                     if '[["e",' in buf or '[["di",' in buf or '["di"' in buf:
                         return
 
@@ -423,12 +419,12 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
                                                 delta = t[len(prev_text):]
                                                 delta = clean_gemini_text(delta, strip=False)
                                                 if delta:
+                                                    last_data_time = time.time() # ONLY update when valid text is found
                                                     yield delta
                                                 prev_text = t
                         except (json.JSONDecodeError, IndexError, TypeError):
                             pass
         except httpx.ReadTimeout:
-            # Silence for 10 seconds means the stream is likely finished but Google/Proxy didn't close it
             return
         except Exception as e:
             if HAS_HTTPX and hasattr(e, 'response') and getattr(e.response, 'status_code', 0) == 405:
