@@ -420,11 +420,13 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
                 if msg == "error":
                     raise chunk
             except queue.Empty:
+                yield "DEBUG_TIMEOUT_QUEUE_EMPTY " * 10
                 return
                 
             buf += chunk
             
             if time.time() - last_data_time > 10.0:
+                yield "DEBUG_TIMEOUT_DATA_IDLE " * 10
                 return
                 
             if "BardErrorInfo" in buf:
