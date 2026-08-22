@@ -379,88 +379,98 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
     # Use a custom timeout: 180s for connect/pool, but 10s for read. 
     # If the stream is completely silent for 10s, we assume generation is done.
     timeout = httpx.Timeout(CONFIG["request_timeout_sec"], read=10.0)
-    with httpx.Client(transport=transport, timeout=timeout, verify=True) as client:
+    
+    import threading, queue
+    q = queue.Queue()
+    
+    def _network_worker():
         try:
-            with client.stream("POST", url, content=body, headers=headers) as resp:
-                resp.raise_for_status()
-                import threading, queue
-                q = queue.Queue()
-                buf = ""
-                
-                def _reader():
-                    try:
-                        for c in resp.iter_text():
-                            q.put(("data", c))
-                        q.put(("done", None))
-                    except Exception as e:
-                        q.put(("error", e))
-                        
-                t = threading.Thread(target=_reader, daemon=True)
-                t.start()
-                
-                last_data_time = time.time()
-                while True:
-                    try:
-                        msg, chunk = q.get(timeout=10.0)
-                        if msg == "done":
-                            break
-                        if msg == "error":
-                            raise chunk
-                    except queue.Empty:
-                        yield " DEBUG_TIMEOUT_QUEUE_EMPTY"
-                        return
-                        
-                    buf += chunk
-                    
-                    if time.time() - last_data_time > 10.0:
-                        yield " DEBUG_TIMEOUT_DATA_IDLE"
-                        return
-                        
-                    if "BardErrorInfo" in buf:
-                        import re as _re
-                        m = _re.search(r'BardErrorInfo\s*\[(\d+)\]', buf)
-                        if m:
-                            raise RuntimeError(f"Gemini upstream rejected request: BardErrorInfo [{m.group(1)}]")
-                            
-                    if '[["e",' in buf or '[["di",' in buf or '["di"' in buf:
-                        yield " DEBUG_NORMAL_EXIT"
-                        return
-
-                    while "\n" in buf:
-                        line, buf = buf.split("\n", 1)
-                        if '"wrb.fr"' not in line or len(line) < 200:
-                            continue
-                        try:
-                            arr = json.loads(line)
-                            inner_str = arr[0][2]
-                            if not inner_str or len(inner_str) < 50:
-                                continue
-                            inner2 = json.loads(inner_str)
-                            if isinstance(inner2, list) and len(inner2) > 4 and inner2[4]:
-                                for part in inner2[4]:
-                                    if isinstance(part, list) and len(part) > 1 and part[1] and isinstance(part[1], list):
-                                        for t in part[1]:
-                                            if isinstance(t, str) and len(t) > len(prev_text):
-                                                delta = t[len(prev_text):]
-                                                delta = clean_gemini_text(delta, strip=False)
-                                                if delta:
-                                                    last_data_time = time.time() # ONLY update when valid text is found
-                                                    yield delta
-                                                prev_text = t
-                        except (json.JSONDecodeError, IndexError, TypeError):
-                            pass
-        except httpx.ReadTimeout:
-            return
+            with httpx.Client(transport=transport, timeout=timeout, verify=True) as client:
+                with client.stream("POST", url, content=body, headers=headers) as resp:
+                    resp.raise_for_status()
+                    q.put(("connected", None))
+                    for c in resp.iter_text():
+                        q.put(("data", c))
+            q.put(("done", None))
         except Exception as e:
-            if HAS_HTTPX and hasattr(e, 'response') and getattr(e.response, 'status_code', 0) == 405:
-                if update_bl_if_needed():
-                    log("BL updated, falling back to non-streaming for this request")
-                    raw = gemini_stream_generate(prompt, model_id, think_mode, file_refs)
-                    text = extract_response_text(raw)
-                    if text:
-                        yield text
-                    return
-            raise
+            q.put(("error", e))
+            
+    t = threading.Thread(target=_network_worker, daemon=True)
+    t.start()
+    
+    try:
+        # Wait for connection to establish or fail
+        try:
+            msg, chunk = q.get(timeout=CONFIG["request_timeout_sec"])
+            if msg == "error":
+                raise chunk
+            if msg != "connected":
+                raise RuntimeError(f"Unexpected queue message: {msg}")
+        except queue.Empty:
+            raise TimeoutError("Timed out waiting for Gemini connection to establish")
+            
+        buf = ""
+        last_data_time = time.time()
+        
+        while True:
+            try:
+                msg, chunk = q.get(timeout=10.0)
+                if msg == "done":
+                    break
+                if msg == "error":
+                    raise chunk
+            except queue.Empty:
+                return
+                
+            buf += chunk
+            
+            if time.time() - last_data_time > 10.0:
+                return
+                
+            if "BardErrorInfo" in buf:
+                import re as _re
+                m = _re.search(r'BardErrorInfo\s*\[(\d+)\]', buf)
+                if m:
+                    raise RuntimeError(f"Gemini upstream rejected request: BardErrorInfo [{m.group(1)}]")
+                    
+            if '[["e",' in buf or '[["di",' in buf or '["di"' in buf:
+                return
+
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                if '"wrb.fr"' not in line or len(line) < 200:
+                    continue
+                try:
+                    arr = json.loads(line)
+                    inner_str = arr[0][2]
+                    if not inner_str or len(inner_str) < 50:
+                        continue
+                    inner2 = json.loads(inner_str)
+                    if isinstance(inner2, list) and len(inner2) > 4 and inner2[4]:
+                        for part in inner2[4]:
+                            if isinstance(part, list) and len(part) > 1 and part[1] and isinstance(part[1], list):
+                                for t in part[1]:
+                                    if isinstance(t, str) and len(t) > len(prev_text):
+                                        delta = t[len(prev_text):]
+                                        delta = clean_gemini_text(delta, strip=False)
+                                        if delta:
+                                            last_data_time = time.time()
+                                            yield delta
+                                        prev_text = t
+                except (json.JSONDecodeError, IndexError, TypeError):
+                    pass
+    except httpx.ReadTimeout:
+        return
+    except Exception as e:
+        if HAS_HTTPX and hasattr(e, 'response') and getattr(e.response, 'status_code', 0) == 405:
+            if update_bl_if_needed():
+                log("BL updated, falling back to non-streaming for this request")
+                raw = gemini_stream_generate(prompt, model_id, think_mode, file_refs)
+                text = extract_response_text(raw)
+                if text:
+                    yield text
+                return
+        raise
 
 
 def clean_gemini_text(text: str, strip: bool = True) -> str:
