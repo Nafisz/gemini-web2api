@@ -219,9 +219,9 @@ def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None
                     urllib.request.ProxyHandler({"http": proxy, "https": proxy}),
                     urllib.request.HTTPSHandler(context=ctx)
                 )
-                resp = opener.open(req, timeout=CONFIG["request_timeout_sec"])
+                resp = opener.open(req, timeout=15)
             else:
-                resp = urllib.request.urlopen(req, context=ctx, timeout=CONFIG["request_timeout_sec"])
+                resp = urllib.request.urlopen(req, context=ctx, timeout=15)
             raw = resp.read().decode("utf-8", errors="replace")
             return extract_response_text(raw)
         except Exception as e:
@@ -249,28 +249,72 @@ def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list
     emitted_raw_text = ""
     for attempt in range(CONFIG["retry_attempts"]):
         try:
-            with client.stream("POST", url, content=body, headers=headers) as resp:
-                resp.raise_for_status()
-                buf = ""
-                for chunk in resp.iter_text():
-                    buf += chunk
-                    if "BardErrorInfo" in buf:
-                        bard_err = re.search(r'BardErrorInfo\s*\[(\d+)\]', buf)
-                        if bard_err:
-                            raise RuntimeError(
-                                f"Gemini upstream rejected request: BardErrorInfo [{bard_err.group(1)}]"
-                            )
-                    while "\n" in buf:
-                        line, buf = buf.split("\n", 1)
-                        for t in _extract_texts_from_line(line):
-                            if t == emitted_raw_text or emitted_raw_text.startswith(t):
-                                continue
-                            if not t.startswith(emitted_raw_text):
-                                raise RuntimeError("Gemini stream content changed during retry")
-                            delta = clean_text(t[len(emitted_raw_text):], strip=False)
-                            emitted_raw_text = t
-                            if delta:
-                                yield delta
+            import threading, queue, time as _time
+            q = queue.Queue()
+            
+            def _network_worker():
+                try:
+                    with client.stream("POST", url, content=body, headers=headers) as resp:
+                        resp.raise_for_status()
+                        q.put(("connected", None))
+                        for c in resp.iter_text():
+                            q.put(("data", c))
+                    q.put(("done", None))
+                except Exception as ex:
+                    q.put(("error", ex))
+            
+            t = threading.Thread(target=_network_worker, daemon=True)
+            t.start()
+            
+            try:
+                msg, chunk = q.get(timeout=CONFIG["request_timeout_sec"])
+                if msg == "error":
+                    raise chunk
+                if msg != "connected":
+                    raise RuntimeError(f"Unexpected queue message: {msg}")
+            except queue.Empty:
+                raise TimeoutError("Timed out waiting for Gemini connection to establish")
+            
+            buf = ""
+            last_data_time = _time.time()
+            
+            while True:
+                try:
+                    msg, chunk = q.get(timeout=10.0)
+                    if msg == "done":
+                        break
+                    if msg == "error":
+                        raise chunk
+                except queue.Empty:
+                    return
+                
+                buf += chunk
+                
+                if _time.time() - last_data_time > 10.0:
+                    return
+                    
+                if "BardErrorInfo" in buf:
+                    bard_err = re.search(r'BardErrorInfo\s*\[(\d+)\]', buf)
+                    if bard_err:
+                        raise RuntimeError(
+                            f"Gemini upstream rejected request: BardErrorInfo [{bard_err.group(1)}]"
+                        )
+                
+                if '[["e",' in buf or '[["di",' in buf or '["di"' in buf:
+                    return
+
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    for t in _extract_texts_from_line(line):
+                        if t == emitted_raw_text or emitted_raw_text.startswith(t):
+                            continue
+                        if not t.startswith(emitted_raw_text):
+                            raise RuntimeError("Gemini stream content changed during retry")
+                        delta = clean_text(t[len(emitted_raw_text):], strip=False)
+                        emitted_raw_text = t
+                        if delta:
+                            last_data_time = _time.time()
+                            yield delta
             return
         except Exception as e:
             last_err = e
