@@ -385,6 +385,7 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
                 resp.raise_for_status()
                 import threading, queue
                 q = queue.Queue()
+                buf = ""
                 
                 def _reader():
                     try:
