@@ -383,7 +383,6 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
         try:
             with client.stream("POST", url, content=body, headers=headers) as resp:
                 resp.raise_for_status()
-                buf = ""
                 import threading, queue
                 q = queue.Queue()
                 
@@ -398,6 +397,7 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
                 t = threading.Thread(target=_reader, daemon=True)
                 t.start()
                 
+                last_data_time = time.time()
                 while True:
                     try:
                         msg, chunk = q.get(timeout=10.0)
@@ -406,10 +406,14 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
                         if msg == "error":
                             raise chunk
                     except queue.Empty:
-                        # 10 seconds without any data yielded, stream is dead
+                        # 10 seconds without any data yielded by httpx, stream is dead
                         return
                         
                     buf += chunk
+                    
+                    if time.time() - last_data_time > 10.0:
+                        # 10 seconds of keep-alives without valid JSON text
+                        return
                         
                     if "BardErrorInfo" in buf:
                         import re as _re
@@ -438,6 +442,7 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
                                                 delta = t[len(prev_text):]
                                                 delta = clean_gemini_text(delta, strip=False)
                                                 if delta:
+                                                    last_data_time = time.time() # ONLY update when valid text is found
                                                     yield delta
                                                 prev_text = t
                         except (json.JSONDecodeError, IndexError, TypeError):
