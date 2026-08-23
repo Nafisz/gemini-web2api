@@ -204,6 +204,9 @@ def extract_response_text(raw: str) -> str:
 
 def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None) -> str:
     """Non-streaming generation with retry."""
+    if HAS_HTTPX:
+        return "".join(list(generate_stream(prompt, model_id, think_mode, file_refs, extra_fields)))
+
     body = _build_payload(prompt, model_id, think_mode, file_refs, extra_fields).encode()
     url = _get_url()
     headers = _build_headers()

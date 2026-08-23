@@ -222,6 +222,9 @@ def upload_images(images: list) -> list:
 
 def gemini_stream_generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None) -> str:
     """Send prompt to Gemini StreamGenerate with retry."""
+    if HAS_HTTPX:
+        return "".join(list(gemini_stream_generate_iter(prompt, model_id, think_mode, file_refs)))
+        
     inner = [None] * 80
     if file_refs:
         refs = [[None, None, ref] for ref in file_refs]
